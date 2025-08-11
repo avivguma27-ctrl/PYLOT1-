@@ -6,6 +6,8 @@ from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import smtplib
+import concurrent.futures
+import pandas as pd
 
 # ============================== #
 # הגדרות ישירות בקוד - הכנס את הפרטים שלך כאן
@@ -20,6 +22,7 @@ EMAIL_LIST = [email.strip() for email in TARGET_EMAILS.split(",")]
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 TICKERS = [
+    # רשימת מניות מורחבת (העתק מהקוד שלך)
     "AAPL","MSFT","AMZN","GOOG","GOOGL","FB","TSLA","BRK.B","BRK.A","JNJ",
     "V","WMT","JPM","UNH","NVDA","HD","PG","MA","DIS","BAC",
     "XOM","PYPL","VZ","ADBE","CMCSA","NFLX","T","KO","PFE","NKE",
@@ -77,6 +80,16 @@ TICKERS = [
 
 analyzer = SentimentIntensityAnalyzer()
 
+def calculate_rsi(prices, period=14):
+    delta = prices.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=period).mean()
+    avg_loss = loss.rolling(window=period).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.iloc[-1]
+
 def get_stock_data(ticker):
     try:
         stock = yf.Ticker(ticker)
@@ -91,6 +104,7 @@ def get_stock_data(ticker):
         avg_volume = hist['Volume'][-30:].mean()
         ma10 = hist['Close'][-10:].mean()
         ma50 = hist['Close'][-50:].mean()
+        rsi = calculate_rsi(hist['Close'])
 
         return {
             "ticker": ticker,
@@ -99,7 +113,8 @@ def get_stock_data(ticker):
             "today_volume": today_volume,
             "avg_volume": avg_volume,
             "ma10": ma10,
-            "ma50": ma50
+            "ma50": ma50,
+            "rsi": rsi
         }
     except Exception as e:
         logging.error(f"Error getting stock data for {ticker}: {e}")
@@ -126,6 +141,7 @@ def score_stock(stock_data, sentiment):
     avg_volume = stock_data['avg_volume']
     ma10 = stock_data['ma10']
     ma50 = stock_data['ma50']
+    rsi = stock_data['rsi']
 
     # 1. ניקוד על שינוי אחוזי במחיר (מקסימום 30)
     abs_change = min(abs(change_pct), 10)
@@ -145,6 +161,13 @@ def score_stock(stock_data, sentiment):
     # 4. סנטימנט חדשות (מקסימום 20)
     sentiment_score = max(min((sentiment + 1) / 2, 1), 0)
     score += sentiment_score * 20
+
+    # 5. ניקוד RSI (מקסימום 10)
+    # ניקוד גבוה כאשר RSI בין 30 ל-70 (איזור אופטימלי)
+    if 30 <= rsi <= 70:
+        score += 10
+    else:
+        score += 3  # נקודות מינימום
 
     # תיקון ניקוד בין 0 ל-100
     if score < 0:
@@ -174,31 +197,42 @@ def send_email(subject, body, to_email, html=False):
     except Exception as e:
         logging.error(f"Failed to send email to {to_email}: {e}")
 
+def process_ticker(ticker):
+    stock_data = get_stock_data(ticker)
+    if not stock_data:
+        return None
+    sentiment = get_news_sentiment(ticker)
+    score = score_stock(stock_data, sentiment)
+    if score >= 70:
+        return (
+            ticker, stock_data, sentiment, score
+        )
+    return None
+
 def main():
-    logging.info("Start processing tickers...")
+    logging.info("Start processing tickers with concurrency...")
     messages = []
 
-    for ticker in TICKERS:
-        stock_data = get_stock_data(ticker)
-        if not stock_data:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        results = executor.map(process_ticker, TICKERS)
+
+    for result in results:
+        if result is None:
             continue
-
-        sentiment = get_news_sentiment(ticker)
-        score = score_stock(stock_data, sentiment)
-
-        if score >= 70:  # רק מניות עם ניקוד מעל 70 בדוח
-            messages.append(
-                f"<b>📈 מניה:</b> {ticker}<br>"
-                f"<b>מחיר סגירה:</b> {stock_data['today_close']:.2f}$<br>"
-                f"<b>שינוי יומי:</b> {stock_data['change_pct']:.2f}%<br>"
-                f"<b>נפח היום:</b> {stock_data['today_volume']}<br>"
-                f"<b>נפח ממוצע 30 יום:</b> {stock_data['avg_volume']:.0f}<br>"
-                f"<b>MA10:</b> {stock_data['ma10']:.2f}<br>"
-                f"<b>MA50:</b> {stock_data['ma50']:.2f}<br>"
-                f"<b>סנטימנט:</b> {sentiment:.2f}<br>"
-                f"<b>ניקוד כולל:</b> {score}<br>"
-                f"<hr>"
-            )
+        ticker, stock_data, sentiment, score = result
+        messages.append(
+            f"<b>📈 מניה:</b> {ticker}<br>"
+            f"<b>מחיר סגירה:</b> {stock_data['today_close']:.2f}$<br>"
+            f"<b>שינוי יומי:</b> {stock_data['change_pct']:.2f}%<br>"
+            f"<b>נפח היום:</b> {stock_data['today_volume']}<br>"
+            f"<b>נפח ממוצע 30 יום:</b> {stock_data['avg_volume']:.0f}<br>"
+            f"<b>MA10:</b> {stock_data['ma10']:.2f}<br>"
+            f"<b>MA50:</b> {stock_data['ma50']:.2f}<br>"
+            f"<b>RSI:</b> {stock_data['rsi']:.2f}<br>"
+            f"<b>סנטימנט:</b> {sentiment:.2f}<br>"
+            f"<b>ניקוד כולל:</b> {score}<br>"
+            f"<hr>"
+        )
 
     body = "<h2>דוח הזדמנויות מניות</h2>" + ("<br>".join(messages) if messages else "<p>אין הזדמנויות כרגע.</p>")
 
