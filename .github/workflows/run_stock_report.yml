@@ -1,31 +1,27 @@
-name: Daily Stock Report
+name: Run Stock Report Daily
 
 on:
   schedule:
-    - cron: '0 7 * * *'  # מריץ כל יום ב-07:00 UTC (10:00 ישראל)
-  workflow_dispatch:
+    - cron: '0 8 * * *'  # רץ כל יום בשעה 8:00 UTC (11:00 בישראל)
+  workflow_dispatch:     # מאפשר הרצה ידנית בלחיצת כפתור
 
 jobs:
-  build:
+  run-stock-report:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Set up Python
+      - name: Setup Python 3.10
         uses: actions/setup-python@v4
         with:
-          python-version: 3.10
+          python-version: '3.10'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install yfinance feedparser vaderSentiment pandas
+          pip install yfinance feedparser vaderSentiment
 
-      - name: Run stock report
-        env:
-          EMAIL_USER: ${{ secrets.EMAIL_USER }}
-          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
-        run: |
-          python stock_report.py
+      - name: Run stock_report.py
+        run: python stock_report.py
