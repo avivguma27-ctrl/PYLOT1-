@@ -6,8 +6,6 @@ from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import smtplib
-import numpy as np
-import pandas as pd
 
 # ============================== #
 # הגדרות ישירות בקוד - הכנס את הפרטים שלך כאן
@@ -79,39 +77,11 @@ TICKERS = [
 
 analyzer = SentimentIntensityAnalyzer()
 
-# --- פונקציות אינדיקטורים טכניים ---
-
-def compute_rsi(close_prices, window=14):
-    delta = close_prices.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.iloc[-1]
-
-def compute_macd(close_prices, fast=12, slow=26, signal=9):
-    exp1 = close_prices.ewm(span=fast, adjust=False).mean()
-    exp2 = close_prices.ewm(span=slow, adjust=False).mean()
-    macd = exp1 - exp2
-    signal_line = macd.ewm(span=signal, adjust=False).mean()
-    macd_hist = macd - signal_line
-    return macd.iloc[-1], signal_line.iloc[-1], macd_hist.iloc[-1]
-
-def compute_bollinger_bands(close_prices, window=20, num_std=2):
-    rolling_mean = close_prices.rolling(window=window).mean()
-    rolling_std = close_prices.rolling(window=window).std()
-    upper_band = rolling_mean + (rolling_std * num_std)
-    lower_band = rolling_mean - (rolling_std * num_std)
-    return rolling_mean.iloc[-1], upper_band.iloc[-1], lower_band.iloc[-1]
-
-# --- שליפת נתוני מניה עם אינדיקטורים נוספים ---
-
 def get_stock_data(ticker):
     try:
         stock = yf.Ticker(ticker)
         hist = stock.history(period="60d")
         if len(hist) < 60:
-            logging.warning(f"Not enough data for {ticker}")
             return None
 
         today_close = hist['Close'][-1]
@@ -122,11 +92,6 @@ def get_stock_data(ticker):
         ma10 = hist['Close'][-10:].mean()
         ma50 = hist['Close'][-50:].mean()
 
-        # אינדיקטורים חדשים
-        rsi = compute_rsi(hist['Close'])
-        macd_val, macd_signal, macd_hist = compute_macd(hist['Close'])
-        bb_mid, bb_upper, bb_lower = compute_bollinger_bands(hist['Close'])
-
         return {
             "ticker": ticker,
             "today_close": today_close,
@@ -134,21 +99,11 @@ def get_stock_data(ticker):
             "today_volume": today_volume,
             "avg_volume": avg_volume,
             "ma10": ma10,
-            "ma50": ma50,
-            "rsi": rsi,
-            "macd": macd_val,
-            "macd_signal": macd_signal,
-            "macd_hist": macd_hist,
-            "bb_mid": bb_mid,
-            "bb_upper": bb_upper,
-            "bb_lower": bb_lower,
-            "hist": hist
+            "ma50": ma50
         }
     except Exception as e:
         logging.error(f"Error getting stock data for {ticker}: {e}")
         return None
-
-# --- ניתוח סנטימנט חדשות ---
 
 def get_news_sentiment(ticker, max_items=5):
     try:
@@ -163,31 +118,6 @@ def get_news_sentiment(ticker, max_items=5):
         logging.error(f"Error getting news sentiment for {ticker}: {e}")
         return 0.0
 
-# --- ניתוח סנטימנט מטוויטר (באמצעות RSS חיפוש טוויטר) ---
-
-def get_twitter_sentiment(ticker, max_items=5):
-    try:
-        rss_url = f"https://twitrss.me/twitter_search_to_rss/?term=%24{ticker}&count={max_items}"
-        feed = feedparser.parse(rss_url)
-        sentiments = []
-        for entry in feed.entries[:max_items]:
-            vs = analyzer.polarity_scores(entry.title)
-            sentiments.append(vs['compound'])
-        return sum(sentiments) / len(sentiments) if sentiments else 0.0
-    except Exception as e:
-        logging.error(f"Error getting twitter sentiment for {ticker}: {e}")
-        return 0.0
-
-# --- סנטימנט משולב (70% חדשות, 30% טוויטר) ---
-
-def combined_sentiment(ticker):
-    news_sent = get_news_sentiment(ticker)
-    twitter_sent = get_twitter_sentiment(ticker)
-    combined = news_sent * 0.7 + twitter_sent * 0.3
-    return combined
-
-# --- פונקציית ניקוד משודרגת עם אינדיקטורים וסנטימנט ---
-
 def score_stock(stock_data, sentiment):
     score = 0.0
 
@@ -196,53 +126,25 @@ def score_stock(stock_data, sentiment):
     avg_volume = stock_data['avg_volume']
     ma10 = stock_data['ma10']
     ma50 = stock_data['ma50']
-    rsi = stock_data['rsi']
-    macd = stock_data['macd']
-    macd_signal = stock_data['macd_signal']
-    bb_upper = stock_data['bb_upper']
-    bb_lower = stock_data['bb_lower']
-    today_close = stock_data['today_close']
 
-    # 1. שינוי אחוזי במחיר (עד 20 נקודות)
+    # 1. ניקוד על שינוי אחוזי במחיר (מקסימום 30)
     abs_change = min(abs(change_pct), 10)
-    score += (abs_change / 10) * 20
+    score += (abs_change / 10) * 30
 
-    # 2. נפח מסחר (עד 20 נקודות)
+    # 2. נפח מסחר (מקסימום 25)
     volume_ratio = today_volume / avg_volume if avg_volume > 0 else 0
     if volume_ratio > 1:
-        score += min((volume_ratio - 1) / 2 * 20, 20)
+        score += min((volume_ratio - 1) / 2 * 25, 25)
 
-    # 3. מגמת ממוצעים נעים (עד 10 נקודות)
+    # 3. מגמת ממוצעים נעים (מקסימום 15)
     if ma10 > ma50:
-        score += 10
+        score += 15
     else:
         score += 5
 
-    # 4. סנטימנט חדשות משולב (עד 20 נקודות)
+    # 4. סנטימנט חדשות (מקסימום 20)
     sentiment_score = max(min((sentiment + 1) / 2, 1), 0)
     score += sentiment_score * 20
-
-    # 5. אינדיקטור RSI (עד 10 נקודות) - יעד: בין 30 ל-70 זה טוב
-    if 30 < rsi < 70:
-        score += 10
-    elif rsi >= 70:
-        score += max(0, 10 - (rsi - 70))
-    else:
-        score += max(0, 10 - (30 - rsi))
-
-    # 6. אינדיקטור MACD (עד 10 נקודות)
-    if macd > macd_signal:
-        score += 10
-    else:
-        score += 5
-
-    # 7. מיקום מחיר ביחס לבולינגר בנדס (עד 10 נקודות)
-    if today_close < bb_lower:
-        score += 10
-    elif today_close > bb_upper:
-        score += 5
-    else:
-        score += 8
 
     # תיקון ניקוד בין 0 ל-100
     if score < 0:
@@ -252,8 +154,6 @@ def score_stock(stock_data, sentiment):
 
     return round(score, 2)
 
-# --- פונקציית שליחת מייל ---
-
 def send_email(subject, body, to_email, html=False):
     try:
         msg = MIMEMultipart("alternative")
@@ -262,4 +162,52 @@ def send_email(subject, body, to_email, html=False):
         msg["To"] = to_email
 
         part = MIMEText(body, "html" if html else "plain")
-        msg.attach(part
+        msg.attach(part)
+
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(EMAIL_USER, EMAIL_PASS)
+            server.sendmail(EMAIL_USER, to_email, msg.as_string())
+
+        logging.info(f"Email sent successfully to {to_email}")
+
+    except Exception as e:
+        logging.error(f"Failed to send email to {to_email}: {e}")
+
+def main():
+    logging.info("Start processing tickers...")
+    messages = []
+
+    for ticker in TICKERS:
+        stock_data = get_stock_data(ticker)
+        if not stock_data:
+            continue
+
+        sentiment = get_news_sentiment(ticker)
+        score = score_stock(stock_data, sentiment)
+
+        if score >= 70:  # רק מניות עם ניקוד מעל 70 בדוח
+            messages.append(
+                f"<b>📈 מניה:</b> {ticker}<br>"
+                f"<b>מחיר סגירה:</b> {stock_data['today_close']:.2f}$<br>"
+                f"<b>שינוי יומי:</b> {stock_data['change_pct']:.2f}%<br>"
+                f"<b>נפח היום:</b> {stock_data['today_volume']}<br>"
+                f"<b>נפח ממוצע 30 יום:</b> {stock_data['avg_volume']:.0f}<br>"
+                f"<b>MA10:</b> {stock_data['ma10']:.2f}<br>"
+                f"<b>MA50:</b> {stock_data['ma50']:.2f}<br>"
+                f"<b>סנטימנט:</b> {sentiment:.2f}<br>"
+                f"<b>ניקוד כולל:</b> {score}<br>"
+                f"<hr>"
+            )
+
+    body = "<h2>דוח הזדמנויות מניות</h2>" + ("<br>".join(messages) if messages else "<p>אין הזדמנויות כרגע.</p>")
+
+    subject = f"דוח הזדמנויות מניות - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+
+    for email in EMAIL_LIST:
+        send_email(subject, body, email, html=True)
+
+    logging.info("Finished sending emails.")
+
+if __name__ == "__main__":
+    main()
